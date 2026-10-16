@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Чат на веб-сокетах</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #f2f4f7; color: #222; }
+    .hidden { display: none !important; }
+
+    #login { max-width: 360px; margin: 15vh auto; background: #fff; padding: 24px;
+             border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.1); }
+    #login h1 { margin-top: 0; font-size: 1.3rem; }
+    #login label { display: block; margin: 12px 0 4px; font-size: .9rem; }
+    #login input[type=text] { width: 100%; padding: 8px; font-size: 1rem; }
+    #login input[type=color] { width: 60px; height: 36px; padding: 0; border: none; }
+    #login button { margin-top: 16px; width: 100%; padding: 10px; font-size: 1rem; cursor: pointer; }
+    #loginError { color: #c0392b; min-height: 1.2em; margin: 8px 0 0; font-size: .9rem; }
+
+    #chat { display: flex; height: 100vh; }
+    #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    #messages { flex: 1; overflow-y: auto; padding: 12px 16px; background: #fff; }
+    .msg { margin: 4px 0; word-wrap: break-word; }
+    .msg.system { color: #777; font-style: italic; }
+    .msg.private { background: #fff8e1; padding: 2px 6px; border-radius: 4px; }
+    .msg .tag { font-size: .8rem; color: #888; }
+
+    #form { display: flex; gap: 8px; padding: 10px; background: #e9ecf1; align-items: center; }
+    #text { flex: 1; padding: 10px; font-size: 1rem; }
+    #send { padding: 10px 18px; font-size: 1rem; cursor: pointer; }
+    #recipient { padding: 10px; font-size: .9rem; max-width: 160px; }
+
+    #sidebar { width: 200px; background: #e9ecf1; padding: 12px; overflow-y: auto;
+               border-left: 1px solid #d0d5dd; }
+    #sidebar h2 { margin: 0 0 8px; font-size: 1rem; }
+    #userList { list-style: none; margin: 0; padding: 0; }
+    #userList li { padding: 6px 8px; border-radius: 4px; cursor: pointer; font-weight: 600; }
+    #userList li:hover { background: #d8dde6; }
+    #userList li.selected { background: #cfd8ea; }
+    #hint { font-size: .8rem; color: #666; margin-top: 10px; }
+
+    @media (max-width: 600px) { #sidebar { display: none; } }
+  </style>
+</head>
+<body>
+
+  <div id="login">
+    <h1>Вход в чат</h1>
+    <label for="nameInput">Ваше имя</label>
+    <input type="text" id="nameInput" maxlength="20" autofocus autocomplete="off">
+    <label for="colorInput">Цвет ваших сообщений</label>
+    <input type="color" id="colorInput" value="#2a6fdb">
+    <button id="joinBtn">Войти</button>
+    <p id="loginError"></p>
+  </div>
+
+  <div id="chat" class="hidden">
+    <div id="main">
+      <div id="messages"></div>
+      <div id="form">
+        <select id="recipient" title="Кому отправить"></select>
+        <input type="text" id="text" placeholder="Введите сообщение и нажмите Enter" autocomplete="off">
+        <button id="send">Отправить</button>
+      </div>
+    </div>
+    <div id="sidebar">
+      <h2>Сейчас в чате</h2>
+      <ul id="userList"></ul>
+      <p id="hint">Нажмите на имя, чтобы написать лично.</p>
+    </div>
+  </div>
+
+<script>
+  const loginBox = document.getElementById('login');
+  const chatBox = document.getElementById('chat');
+  const nameInput = document.getElementById('nameInput');
+  const colorInput = document.getElementById('colorInput');
+  const loginError = document.getElementById('loginError');
+  const messagesEl = document.getElementById('messages');
+  const textInput = document.getElementById('text');
+  const recipientSel = document.getElementById('recipient');
+  const userListEl = document.getElementById('userList');
+
+  let myName = null;
+  let selectedUser = '';
+
+  const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const socket = new WebSocket(protocol + location.host);
+
+  function join() {
+    const name = nameInput.value.trim();
+    if (!name) { loginError.textContent = 'Введите имя.'; return; }
+    if (socket.readyState !== WebSocket.OPEN) { loginError.textContent = 'Нет соединения с сервером.'; return; }
+    socket.send(JSON.stringify({ type: 'join', name, color: colorInput.value }));
+  }
+  document.getElementById('joinBtn').addEventListener('click', join);
+  nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') join(); });
+
+  function sendMessage() {
+    const text = textInput.value.trim();
+    if (!text || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: 'message', text, to: selectedUser || undefined }));
+    textInput.value = '';
+    textInput.focus();
+  }
+  document.getElementById('send').addEventListener('click', sendMessage);
+  textInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
+ 
+  function addLine(el) {
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function addSystem(text) {
+    const div = document.createElement('div');
+    div.className = 'msg system';
+    div.textContent = text;
+    addLine(div);
+  }
+
+  function addMessage(m) {
+    const div = document.createElement('div');
+    div.className = 'msg' + (m.private ? ' private' : '');
+
+    const author = document.createElement('strong');
+    author.style.color = m.color;
+    author.textContent = m.name + ': ';
+    div.appendChild(author);
+
+    const body = document.createElement('span');
+    body.textContent = m.text;
+    div.appendChild(body);
+
+    if (m.private) {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = m.name === myName ? '  (лично для ' + m.to + ')' : '  (личное сообщение)';
+      div.appendChild(tag);
+    }
+    addLine(div);
+  }
+
+  function renderUsers(users) {
+    userListEl.innerHTML = '';
+    recipientSel.innerHTML = '';
+
+    const all = document.createElement('option');
+    all.value = '';
+    all.textContent = 'Всем';
+    recipientSel.appendChild(all);
+
+    if (!users.some(u => u.name === selectedUser)) selectedUser = '';
+
+    users.forEach(u => {
+      const li = document.createElement('li');
+      li.textContent = u.name + (u.name === myName ? ' (вы)' : '');
+      li.style.color = u.color;
+      if (u.name === selectedUser) li.classList.add('selected');
+      if (u.name !== myName) {
+        li.addEventListener('click', () => {
+          selectedUser = (selectedUser === u.name) ? '' : u.name;
+          renderUsers(users);
+          textInput.focus();
+        });
+
+        const opt = document.createElement('option');
+        opt.value = u.name;
+        opt.textContent = u.name;
+        recipientSel.appendChild(opt);
+      }
+      userListEl.appendChild(li);
+    });
+    recipientSel.value = selectedUser;
+  }
+
+  recipientSel.addEventListener('change', () => {
+    selectedUser = recipientSel.value;
+    [...userListEl.children].forEach(li => {
+      li.classList.toggle('selected', li.textContent.startsWith(selectedUser) && selectedUser !== '');
+    });
+  });
+
+  socket.addEventListener('message', (event) => {
+    const m = JSON.parse(event.data);
+    switch (m.type) {
+      case 'joined':
+        myName = m.name;
+        loginBox.classList.add('hidden');
+        chatBox.classList.remove('hidden');
+        textInput.focus();
+        break;
+      case 'join_error':
+        loginError.textContent = m.text;
+        break;
+      case 'system':
+        addSystem(m.text);
+        break;
+      case 'message':
+        addMessage(m);
+        break;
+      case 'users':
+        renderUsers(m.users);
+        break;
+    }
+  });
+
+  socket.addEventListener('close', () => {
+    addSystem('Соединение с сервером потеряно. Обновите страницу.');
+    if (!myName) loginError.textContent = 'Соединение с сервером потеряно.';
+  });
+</script>
+</body>
+</html>
